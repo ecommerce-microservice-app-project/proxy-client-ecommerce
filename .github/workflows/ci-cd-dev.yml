@@ -157,7 +157,7 @@ jobs:
     - name: Checkout infrastructure repository
       uses: actions/checkout@v4
       with:
-        repository: ${{ secrets.INFRA_REPO || format('{0}/ecommerce-infra', github.repository_owner) }}
+        repository: ${{ secrets.INFRA_REPO }}
         path: infra
         
     - name: Set up kubectl
