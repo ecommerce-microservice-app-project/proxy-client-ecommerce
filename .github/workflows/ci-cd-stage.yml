@@ -1,21 +1,20 @@
-name: Proxy Client - CI/CD Dev
+name: Proxy Client - CI/CD Stage
 
 on:
   push:
     branches:
-      - develop
-      - dev
+      - stage
   pull_request:
     branches:
-      - develop
-      - dev
+      - stage
   workflow_dispatch:
 
 env:
   REGISTRY: docker.io
   IMAGE_NAME: juanc7773/proxy-client
   SERVICE_NAME: proxy-client
-  KUBERNETES_NAMESPACE: ecommerce-dev
+  KUBERNETES_NAMESPACE: ecommerce-stage
+  IMAGE_TAG: stage-latest
 
 jobs:
   build-and-test:
@@ -86,20 +85,13 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
         
-    - name: Set image tag for dev
-      id: tag
-      run: |
-        # Este pipeline es solo para dev, siempre usa dev-latest
-        echo "IMAGE_TAG=dev-latest" >> $GITHUB_OUTPUT
-        echo "ENV_NAME=development" >> $GITHUB_OUTPUT
-        
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         tags: |
-          type=raw,value=${{ steps.tag.outputs.IMAGE_TAG }}
+          type=raw,value=${{ env.IMAGE_TAG }}
           type=sha,format=short
           type=raw,value=0.1.0
           
@@ -118,7 +110,7 @@ jobs:
         cache-to: type=gha,mode=max
         
   deploy:
-    name: Deploy to Kubernetes
+    name: Deploy to Kubernetes (Stage)
     needs: build-docker
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
@@ -127,13 +119,6 @@ jobs:
       contents: read
     
     steps:
-    - name: Set environment for dev
-      id: env
-      run: |
-        # Este pipeline es solo para dev, siempre usa dev-latest
-        echo "IMAGE_TAG=dev-latest" >> $GITHUB_OUTPUT
-        echo "ENV_NAME=development" >> $GITHUB_OUTPUT
-        
     - name: Checkout code
       uses: actions/checkout@v4
       
@@ -148,25 +133,21 @@ jobs:
       with:
         version: 'latest'
         
-    - name: Azure Login
+    - name: Azure Login (Stage)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        creds: ${{ secrets.AZURE_CREDENTIALS_STAGE }}
         
-    - name: Configure kubectl
+    - name: Configure kubectl (Stage Cluster)
       run: |
-        echo "Configuring kubectl for cluster: ${{ secrets.AZURE_AKS_CLUSTER }}"
-        echo "Resource Group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
+        RESOURCE_GROUP="${{ secrets.AZURE_RESOURCE_GROUP_STAGE }}"
+        CLUSTER_NAME="${{ secrets.AZURE_AKS_CLUSTER_STAGE }}"
         
-        az aks get-credentials --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --name ${{ secrets.AZURE_AKS_CLUSTER }} --overwrite-existing
+        echo "Connecting to Azure Stage cluster: $CLUSTER_NAME in resource group: $RESOURCE_GROUP"
+        az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
         
-        # Verificar que la configuración funcionó
-        echo "Verifying kubectl connection..."
+        # Verificar conexión
         kubectl cluster-info
-        
-        # Verificar que podemos listar namespaces
-        echo "Testing kubectl access..."
-        kubectl get namespaces || echo "Warning: Could not list namespaces"
         
     - name: Create namespace if not exists
       run: |
@@ -174,7 +155,9 @@ jobs:
         
     - name: Deploy to Kubernetes
       run: |
-        IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.IMAGE_TAG }}"
+        IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+        
+        echo "Deploying image: $IMAGE_NAME to namespace: ${{ env.KUBERNETES_NAMESPACE }}"
         
         # Create temporary deployment file from infra repo
         cp infra/k8s/proxy-client/deployment.yaml deployment.tmp.yaml
@@ -190,25 +173,18 @@ jobs:
         # Create temporary configmap file and replace placeholders
         cp infra/k8s/proxy-client/configmap.yaml configmap.tmp.yaml
         sed -i "s|<NAMESPACE>|${{ env.KUBERNETES_NAMESPACE }}|g" configmap.tmp.yaml
-        sed -i "s|<PROFILE>|dev|g" configmap.tmp.yaml
+        sed -i "s|<PROFILE>|stage|g" configmap.tmp.yaml
         
         kubectl apply -f configmap.tmp.yaml
         
         # Cleanup
         rm deployment.tmp.yaml configmap.tmp.yaml
         
-    - name: Force rollout restart (para tags estáticos como dev-latest)
+    - name: Force rollout restart (stage-latest tag)
       run: |
-        # Cuando usamos tags estáticos (dev-latest, stage-latest), Kubernetes puede no detectar
-        # que la imagen cambió. Forzamos el restart para asegurar que descargue la nueva imagen.
-        if [[ "${{ steps.env.outputs.IMAGE_TAG }}" == "dev-latest" ]] || \
-           [[ "${{ steps.env.outputs.IMAGE_TAG }}" == "stage-latest" ]]; then
-          echo "Tag estático detectado: ${{ steps.env.outputs.IMAGE_TAG }}"
-          echo "Forzando rollout restart para asegurar descarga de nueva imagen..."
-          kubectl rollout restart deployment/${{ env.SERVICE_NAME }} -n ${{ env.KUBERNETES_NAMESPACE }}
-        else
-          echo "Tag único detectado: ${{ steps.env.outputs.IMAGE_TAG }}, no se necesita restart forzado"
-        fi
+        echo "Tag estático detectado: ${{ env.IMAGE_TAG }}"
+        echo "Forzando rollout restart para asegurar descarga de nueva imagen..."
+        kubectl rollout restart deployment/${{ env.SERVICE_NAME }} -n ${{ env.KUBERNETES_NAMESPACE }}
         
     - name: Wait for deployment
       run: |
@@ -216,5 +192,12 @@ jobs:
         
     - name: Verify deployment
       run: |
+        echo "=== Pods ==="
         kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }} -l app=${{ env.SERVICE_NAME }}
+        echo ""
+        echo "=== Services ==="
         kubectl get svc -n ${{ env.KUBERNETES_NAMESPACE }} -l app=${{ env.SERVICE_NAME }}
+        echo ""
+        echo "=== Deployment Status ==="
+        kubectl get deployment ${{ env.SERVICE_NAME }} -n ${{ env.KUBERNETES_NAMESPACE }}
+
