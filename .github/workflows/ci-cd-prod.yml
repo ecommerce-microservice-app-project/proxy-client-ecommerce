@@ -172,6 +172,12 @@ jobs:
         # Cleanup
         rm deployment.tmp.yaml configmap.tmp.yaml
         
+    - name: Force rollout restart (prod-0.1.0 tag)
+      run: |
+        echo "Tag estático detectado: ${{ env.IMAGE_TAG }}"
+        echo "Forzando rollout restart para asegurar descarga de nueva imagen..."
+        kubectl rollout restart deployment/${{ env.SERVICE_NAME }} -n ${{ env.KUBERNETES_NAMESPACE }}
+        
     - name: Check pod status before waiting
       run: |
         echo "=== Pod Status ==="
