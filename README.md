@@ -1,4 +1,4 @@
-# Proxy Client (Frontend Application)
+# Proxy Client (Frontend Application).
 
 ##  Descripción
 
