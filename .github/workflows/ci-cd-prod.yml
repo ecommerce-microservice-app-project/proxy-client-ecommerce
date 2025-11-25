@@ -16,16 +16,119 @@ env:
   IMAGE_NAME: juanc7773/proxy-client
   SERVICE_NAME: proxy-client
   KUBERNETES_NAMESPACE: ecommerce-prod
-  IMAGE_TAG: prod-0.1.0
 
 jobs:
+  calculate-version:
+    name: Calculate Semantic Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Calculate Semantic Version
+      id: version
+      run: |
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        echo "Last tag: $LAST_TAG"
+        
+        LAST_VERSION=$(echo "$LAST_TAG" | sed 's/^v//' | sed 's/^prod-//')
+        if [ -z "$LAST_VERSION" ] || [ "$LAST_VERSION" == "0.0.0" ]; then
+          LAST_VERSION="0.0.0"
+        fi
+        
+        echo "Last version: $LAST_VERSION"
+        
+        COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s" --no-merges 2>/dev/null || git log -10 --pretty=format:"%s" --no-merges)
+        
+        if [ -z "$COMMITS" ]; then
+          echo "No new commits, using last version"
+          NEW_VERSION="$LAST_VERSION"
+        else
+          echo "=== Commits since last tag ==="
+          echo "$COMMITS"
+          echo "=============================="
+          
+          MAJOR=0
+          MINOR=0
+          PATCH=0
+          
+          while IFS= read -r commit; do
+            if [ -n "$commit" ]; then
+              if echo "$commit" | grep -qiE "BREAKING CHANGE|breaking:"; then
+                MAJOR=1
+                echo "✓ BREAKING CHANGE detected"
+              elif echo "$commit" | grep -qiE "^(feat|feature):"; then
+                MINOR=1
+                echo "✓ feat detected"
+              elif echo "$commit" | grep -qiE "^(fix|bugfix):"; then
+                PATCH=1
+                echo "✓ fix detected"
+              fi
+            fi
+          done <<< "$COMMITS"
+          
+          IFS='.' read -r MAJOR_CURRENT MINOR_CURRENT PATCH_CURRENT <<< "$LAST_VERSION"
+          
+          if [ "$MAJOR" -eq 1 ]; then
+            NEW_MAJOR=$((MAJOR_CURRENT + 1))
+            NEW_MINOR=0
+            NEW_PATCH=0
+            echo "Incrementing MAJOR version"
+          elif [ "$MINOR" -eq 1 ]; then
+            NEW_MAJOR=$MAJOR_CURRENT
+            NEW_MINOR=$((MINOR_CURRENT + 1))
+            NEW_PATCH=0
+            echo "Incrementing MINOR version"
+          elif [ "$PATCH" -eq 1 ]; then
+            NEW_MAJOR=$MAJOR_CURRENT
+            NEW_MINOR=$MINOR_CURRENT
+            NEW_PATCH=$((PATCH_CURRENT + 1))
+            echo "Incrementing PATCH version"
+          else
+            NEW_MAJOR=$MAJOR_CURRENT
+            NEW_MINOR=$MINOR_CURRENT
+            NEW_PATCH=$((PATCH_CURRENT + 1))
+            echo "No conventional commits found, incrementing PATCH"
+          fi
+          
+          NEW_VERSION="${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
+        fi
+        
+        IMAGE_TAG="prod-${NEW_VERSION}"
+        
+        echo "New version: $NEW_VERSION"
+        echo "New image tag: $IMAGE_TAG"
+        
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+    
+    - name: Display Version Info
+      run: |
+        echo "Calculated version: ${{ steps.version.outputs.version }}"
+        echo "Image tag: ${{ steps.version.outputs.image_tag }}"
+
   build-and-test:
     name: Build and Test
+    needs: calculate-version
     runs-on: ubuntu-latest
     
     permissions:
       contents: read
       checks: write
+    
+    env:
+      IMAGE_TAG: ${{ needs.calculate-version.outputs.image_tag }}
+      VERSION: ${{ needs.calculate-version.outputs.version }}
     
     steps:
     - name: Checkout code
@@ -48,13 +151,17 @@ jobs:
         
   build-docker:
     name: Build and Push Docker Image
-    needs: build-and-test
+    needs: [calculate-version, build-and-test]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     
     permissions:
       contents: read
       packages: write
+    
+    env:
+      IMAGE_TAG: ${{ needs.calculate-version.outputs.image_tag }}
+      VERSION: ${{ needs.calculate-version.outputs.version }}
       
     steps:
     - name: Checkout code
@@ -74,7 +181,7 @@ jobs:
         tags: |
           type=raw,value=${{ env.IMAGE_TAG }}
           type=sha,format=short
-          type=raw,value=0.1.0
+          type=raw,value=${{ env.VERSION }}
           
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -92,13 +199,17 @@ jobs:
         
   deploy:
     name: Deploy to Kubernetes (Production)
-    needs: build-docker
+    needs: [calculate-version, build-docker]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     
     permissions:
       contents: read
     
+    env:
+      IMAGE_TAG: ${{ needs.calculate-version.outputs.image_tag }}
+      VERSION: ${{ needs.calculate-version.outputs.version }}
+      
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -210,7 +321,7 @@ jobs:
 
   release-notes:
     name: Generate Release Notes
-    needs: deploy
+    needs: [calculate-version, deploy]
     runs-on: ubuntu-latest
     if: |
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
@@ -219,17 +330,21 @@ jobs:
     permissions:
       contents: write
     
+    env:
+      IMAGE_TAG: ${{ needs.calculate-version.outputs.image_tag }}
+      VERSION: ${{ needs.calculate-version.outputs.version }}
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Necesario para obtener todo el historial
+        fetch-depth: 0
     
     - name: Set environment for prod
       id: env
       run: |
-        # Este pipeline es solo para prod, siempre usa prod-0.1.0
-        echo "IMAGE_TAG=prod-0.1.0" >> $GITHUB_OUTPUT
+        echo "IMAGE_TAG=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+        echo "VERSION=${{ env.VERSION }}" >> $GITHUB_OUTPUT
         echo "ENV_NAME=production" >> $GITHUB_OUTPUT
     
     - name: Get latest tag
@@ -245,6 +360,8 @@ jobs:
           echo "PREVIOUS_TAG=$TAG" >> $GITHUB_OUTPUT
           echo "HAS_PREVIOUS_TAG=true" >> $GITHUB_OUTPUT
         fi
+        echo "Current version: ${{ env.VERSION }}"
+        echo "Current image tag: ${{ env.IMAGE_TAG }}"
     
     - name: Get commits since last tag (or from push)
       id: get_commits
@@ -320,14 +437,20 @@ jobs:
         echo "$FILTERED_COMMITS"
         
         # Generar release notes usando archivo temporal para evitar problemas de sintaxis YAML
-        IMAGE_TAG="${{ steps.env.outputs.IMAGE_TAG }}"
+        IMAGE_TAG="${{ env.IMAGE_TAG }}"
+        VERSION="${{ env.VERSION }}"
         NAMESPACE="${{ env.KUBERNETES_NAMESPACE }}"
         SERVICE_NAME="${{ env.SERVICE_NAME }}"
         DEPLOY_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
         
         # Construir release notes línea por línea
         {
-          echo "# Release $IMAGE_TAG"
+          echo "# Release $VERSION - $SERVICE_NAME"
+          echo ""
+          echo "## Version Information"
+          echo ""
+          echo "- **Version**: $VERSION"
+          echo "- **Image Tag**: $IMAGE_TAG"
           echo ""
           echo "## Changes"
           echo ""
@@ -335,7 +458,6 @@ jobs:
           echo ""
           echo "## Deployment Info"
           echo ""
-          echo "- **Image Tag**: $IMAGE_TAG"
           echo "- **Namespace**: $NAMESPACE"
           echo "- **Service**: $SERVICE_NAME"
           echo "- **Deployed at**: $DEPLOY_TIME"
@@ -356,14 +478,24 @@ jobs:
         echo "Release Notes generated:"
         cat /tmp/release_notes.md
     
+    - name: Create Git Tag
+      if: |
+        steps.get_commits.outputs.HAS_VALID_COMMITS == 'true' &&
+        steps.release_notes.outputs.SKIP_RELEASE != 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -a "${{ env.IMAGE_TAG }}" -m "Release ${{ env.VERSION }} - ${{ env.SERVICE_NAME }}"
+        git push origin "${{ env.IMAGE_TAG }}" || echo "Tag may already exist, continuing..."
+    
     - name: Create GitHub Release
       if: |
         steps.get_commits.outputs.HAS_VALID_COMMITS == 'true' &&
         steps.release_notes.outputs.SKIP_RELEASE != 'true'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.env.outputs.IMAGE_TAG }}
-        name: Release ${{ steps.env.outputs.IMAGE_TAG }} - ${{ env.SERVICE_NAME }}
+        tag_name: ${{ env.IMAGE_TAG }}
+        name: Release ${{ env.VERSION }} - ${{ env.SERVICE_NAME }}
         body_path: /tmp/release_notes.md
         draft: false
         prerelease: false
